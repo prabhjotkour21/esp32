@@ -540,9 +540,9 @@ void Process_data(void *arg){
     u8 Packet_type = 0x03;
 
     while(1){
-		vTaskDelay(pdMS_TO_TICKS(5000));
-				// raw_packet array under study
-		TRANSMIT(0);
+		vTaskDelay(pdMS_TO_TICKS(3000));
+		// raw_packet array under study
+		TRANSMIT(0); 
 		
 		size_t packet_length = ((DG_TXB[5] >> 1) + 9);
         if (packet_length > sizeof(DG_TXB)) {
@@ -551,7 +551,7 @@ void Process_data(void *arg){
             continue;
         }
 	// 	packet_length = sizeof(raw_packet) / sizeof(raw_packet[0]);
-
+		// Packet Receiving
 		printf("--- Streaming Packet into Receiver1 State Machine ---\n");
 		for (size_t i = 0; i < packet_length; i++) {
 			Receiver1(&sIOT_COMM, DG_TXB[i]);
@@ -571,17 +571,14 @@ void Process_data(void *arg){
             continue;
         }
 
-        if (packet_length > sizeof(sIOT_COMM.RX_DATA) ||
-            sIOT_COMM.RX_DATA_INDEX_COUNTS > MAX_IDinPACKET) {
+        if (packet_length > sizeof(sIOT_COMM.RX_DATA) || sIOT_COMM.RX_DATA_INDEX_COUNTS > MAX_IDinPACKET) {
             printf("Decoded packet exceeds receive buffer limits\n");
             sIOT_COMM.RX_DATA_RECEIVED = false;
             sIOT_COMM.RX_COMM_ERR = false;
             continue;
         }
 
-        total_length =
-            (packet_length * 2) + P_HEADER_SIZE +
-            sIOT_COMM.RX_DATA_INDEX_COUNTS;
+        total_length = (packet_length * 2) + P_HEADER_SIZE + sIOT_COMM.RX_DATA_INDEX_COUNTS;
         if (total_length + 4 > sizeof(TXB) ||
             total_length > sizeof(ACT) ||
             total_length > UINT8_MAX) {
@@ -596,22 +593,85 @@ void Process_data(void *arg){
 		// 	printf("Index [%02lu]: 0x%02X\n",(unsigned long)i,sIOT_COMM.RX_DATA[i]);
 		// }
 		// printf("\n");
+		app_command_t command = {0};
+		if (xQueueReceive(s_app_command_queue, &command, 0) == pdTRUE) {
+			// printf("Received app command: type=%d request_id=%lu table=%s version=%s\n",
+			//        command.type,
+			//        (unsigned long)command.request_id,
+			//        command.table_number,
+			//        command.version);
+			if(command.packet_type == Display_Packet_TYPE){
+				memset(ACT, 0x00, 256);
+				ACT[0] = APP_START_CHARACTER;
+				ACT[1] = APP_START_CHARACTER;
+				for(size_t i = 0, j = 2; i < PRODUCT_VERSION_SIZE; i++, j+=2){
+					putByte(&ACT[j], (uint8_t)PRODUCT_VERSION[i]);
+				}
+				putByte(&ACT[18], (uint8_t)ESP32);
+				putByte(&ACT[20], (uint8_t)APP);
+				putByte(&ACT[22], (uint8_t)Display_Packet_TYPE);
+				putByte(&ACT[24], (uint8_t)Display_Packet_TYPE);
+				putByte(&ACT[26], (uint8_t)((packet_length*2)+sIOT_COMM.RX_DATA_INDEX_COUNTS+2));
+				bool layout_valid = true;
+				for(size_t i = P_HEADER_SIZE, j = 0, k = 0, cnt = 0; i < total_length; ){
+					if(k < sIOT_COMM.RX_DATA_INDEX_COUNTS &&
+					i == (sIOT_COMM.RX_DATA_INDEX_POSITIONS[k] + P_HEADER_SIZE + cnt + j)){
+						ACT[i] = '$';
+						cnt++;
+						k++;
+						i++;
+					}
+					else{
+						if (j >= packet_length || i + 1 >= total_length) {
+							printf("Invalid encoded packet layout\n");
+							layout_valid = false;
+							break;
+						}
+						putByte(&ACT[i], sIOT_COMM.RX_DATA[j]);
+						i+=2;
+						j++;
+					}
+				}
+				if (!layout_valid) {
+					sIOT_COMM.RX_DATA_RECEIVED = false;
+					sIOT_COMM.RX_COMM_ERR = false;
+					continue;
+				}
+				putByte(&ACT[total_length], (uint8_t)(VALID_PACKET));
+				u16 CRC = 0xFFFF;
+				for (size_t i = 0; i < ((packet_length * 2) + P_HEADER_SIZE + sIOT_COMM.RX_DATA_INDEX_COUNTS + 2); i++) {
+					// printf("0x%02X\n",ACT[i]);
+					CRC = FIND_CRC(CRC, ACT[i]);
+				}
+				memset(TXB, 0x00, 256);
+				memcpy(TXB, ACT, total_length+2);
+				putByte(&TXB[(total_length)+2], (uint8_t)(CRC >> 8) & 0xFF);
+				putByte(&TXB[(total_length)+4], (uint8_t)(CRC >> 0) & 0xFF);
+				printf("CRC : [0x%02X], Length = %d\n", CRC, total_length);
 
-        memset(ACT, 0x00, 256);
-		ACT[0] = APP_START_CHARACTER;
-		ACT[1] = APP_START_CHARACTER;
+				server_packet_t send_packet = {0};
+				send_packet.length = (total_length + 6);
+				memcpy(send_packet.data, TXB, send_packet.length);
 
-		for(size_t i = 0, j = 2; i < PRODUCT_VERSION_SIZE; i++, j+=2){
-			putByte(&ACT[j], (uint8_t)PRODUCT_VERSION[i]);
+				app_response_t response = {0};
+				response.request_id = command.request_id;
+				response.success = true;
+				response.packet = send_packet;
+				if (xQueueSend(s_app_response_queue, &response, 0) != pdTRUE) {
+					printf("Failed to queue outbound server packet\n");
+				} else {
+					printf("Queued outbound server packet of length %u\n", (unsigned)response.packet.length);
+				}
+				// printf("Server Packet\n");
+				// for (size_t i = 0; i < ((total_length)+6); i++) {
+				// 	printf("0x%02X,\n",TXB[i]);
+				// }
+
+			}
 		}
-        putByte(&ACT[18], (uint8_t)source);
-        putByte(&ACT[20], (uint8_t)destination);
-        putByte(&ACT[22], (uint8_t)Packet_type);
-        putByte(&ACT[24], (uint8_t)table);
-        putByte(&ACT[26], (uint8_t)((packet_length*2)+sIOT_COMM.RX_DATA_INDEX_COUNTS));
-        printf("\n");
-        printf("Packet Length : %d\n", packet_length);
-        printf("RX Index : %d\n", sIOT_COMM.RX_DATA_INDEX_COUNTS);
+
+        // printf("Packet Length : %d\n", packet_length);
+        // printf("RX Index : %d\n", sIOT_COMM.RX_DATA_INDEX_COUNTS);
         // printf("Actul packet\n");
         // for(size_t i = 0; i < (packet_length); i++){
         //     printf("0x%02X\n",sIOT_COMM.RX_DATA[i]);
@@ -622,44 +682,45 @@ void Process_data(void *arg){
         //     printf("0x%02X\n",sIOT_COMM.RX_DATA_INDEX_POSITIONS[i]);
         // }
         // printf("\n");
-        bool layout_valid = true;
-		for(size_t i = P_HEADER_SIZE, j = 0, k = 0, cnt = 0; i < total_length; ){
-			if(k < sIOT_COMM.RX_DATA_INDEX_COUNTS &&
-               i == (sIOT_COMM.RX_DATA_INDEX_POSITIONS[k] + P_HEADER_SIZE + cnt + j)){
-				ACT[i] = '$';
-				cnt++;
-				k++;
-				i++;
-			}
-			else{
-                if (j >= packet_length || i + 1 >= total_length) {
-                    printf("Invalid encoded packet layout\n");
-                    layout_valid = false;
-                    break;
-                }
-                putByte(&ACT[i], sIOT_COMM.RX_DATA[j]);
-				i+=2;
-				j++;
-			}
-		}
-        if (!layout_valid) {
-            sIOT_COMM.RX_DATA_RECEIVED = false;
-            sIOT_COMM.RX_COMM_ERR = false;
-            continue;
-        }
+        // bool layout_valid = true;
+		// for(size_t i = P_HEADER_SIZE, j = 0, k = 0, cnt = 0; i < total_length; ){
+		// 	if(k < sIOT_COMM.RX_DATA_INDEX_COUNTS &&
+        //        i == (sIOT_COMM.RX_DATA_INDEX_POSITIONS[k] + P_HEADER_SIZE + cnt + j)){
+		// 		ACT[i] = '$';
+		// 		cnt++;
+		// 		k++;
+		// 		i++;
+		// 	}
+		// 	else{
+        //         if (j >= packet_length || i + 1 >= total_length) {
+        //             printf("Invalid encoded packet layout\n");
+        //             layout_valid = false;
+        //             break;
+        //         }
+        //         putByte(&ACT[i], sIOT_COMM.RX_DATA[j]);
+		// 		i+=2;
+		// 		j++;
+		// 	}
+		// }
+        // if (!layout_valid) {
+        //     sIOT_COMM.RX_DATA_RECEIVED = false;
+        //     sIOT_COMM.RX_COMM_ERR = false;
+        //     continue;
+        // }
         // printf("\n");
-		u16 CRC = 0xFFFF;
-		for (size_t i = 0; i < ((packet_length * 2) + P_HEADER_SIZE + sIOT_COMM.RX_DATA_INDEX_COUNTS); i++) {
-			// printf("0x%02X\n",ACT[i]);
-			CRC = FIND_CRC(CRC, ACT[i]);
-		}
+		// u16 CRC = 0xFFFF;
+		// for (size_t i = 0; i < ((packet_length * 2) + P_HEADER_SIZE + sIOT_COMM.RX_DATA_INDEX_COUNTS); i++) {
+		// 	// printf("0x%02X\n",ACT[i]);
+		// 	CRC = FIND_CRC(CRC, ACT[i]);
+		// }
         // printf("\n");
 		// printf("CRC : [0x%02X], Length = %d\n", CRC, total_length);
 		// printf("\n");
-        memset(TXB, 0x00, 256);
-        memcpy(TXB, ACT, total_length);
-        putByte(&TXB[(total_length)], (uint8_t)(CRC >> 8) & 0xFF);
-        putByte(&TXB[(total_length)+2], (uint8_t)(CRC >> 0) & 0xFF);
+        // memset(TXB, 0x00, 256);
+        // memcpy(TXB, ACT, total_length);
+        // putByte(&TXB[(total_length)], (uint8_t)(CRC >> 8) & 0xFF);
+        // putByte(&TXB[(total_length)+2], (uint8_t)(CRC >> 0) & 0xFF);
+
         
         // printf("Server Packet\n");
         // for (size_t i = 0; i < ((total_length)+4); i++) {
@@ -687,108 +748,108 @@ void Process_data(void *arg){
 		// printf("Calculated TX CRC:  0x%04X\n", sIOT_COMM.TX_CRC);
 		// printf("Reconstructed target CRC: 0x%04X\n", sIOT_COMM.RX_CS_RECEIVED.HWORD);
 		
-		printf("[DECONSTRUCTED TELEMETRY VALUE PAYLOAD]\n");
-		u8 vID = 0;
-		u8 bSize = 0;
-		u8 uTYPE = 0;
-		u8 x = 0; 
-		float actualVal = 0;
+		// printf("[DECONSTRUCTED TELEMETRY VALUE PAYLOAD]\n");
+		// u8 vID = 0;
+		// u8 bSize = 0;
+		// u8 uTYPE = 0;
+		// u8 x = 0; 
+		// float actualVal = 0;
 		
-		for (u32 d = 0; d < sIOT_COMM.RX_DATA_INDEX_COUNTS; d++) {
-			x = sIOT_COMM.RX_DATA_INDEX_POSITIONS[d];
-			vID = sIOT_COMM.RX_DATA[x];
+		// for (u32 d = 0; d < sIOT_COMM.RX_DATA_INDEX_COUNTS; d++) {
+		// 	x = sIOT_COMM.RX_DATA_INDEX_POSITIONS[d];
+		// 	vID = sIOT_COMM.RX_DATA[x];
 			
-			// if (vID >= MAX_IDS || id_metadata_table[vID].name == NULL) {
-			// 	printf("Index[%lu] : Unknown ID [%d]\n", (unsigned long)x, vID);
-			// 	continue;
-			// }
+		// 	// if (vID >= MAX_IDS || id_metadata_table[vID].name == NULL) {
+		// 	// 	printf("Index[%lu] : Unknown ID [%d]\n", (unsigned long)x, vID);
+		// 	// 	continue;
+		// 	// }
 		
-			bSize = id_metadata_table[vID].num_bytes;
-			uTYPE = id_metadata_table[vID].data_type;
+		// 	bSize = id_metadata_table[vID].num_bytes;
+		// 	uTYPE = id_metadata_table[vID].data_type;
 			
-			if((bSize == 1)&&(uTYPE == TYPE_UINT8)){
-				uint8_t uVal = ((uint8_t)sIOT_COMM.RX_DATA[x + 1]);
-				actualVal = (float)uVal * id_metadata_table[vID].multiplier;
+		// 	if((bSize == 1)&&(uTYPE == TYPE_UINT8)){
+		// 		uint8_t uVal = ((uint8_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 		actualVal = (float)uVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-					(unsigned long)x, vID, id_metadata_table[vID].name, 
-					id_metadata_table[vID].decimal_place, actualVal);
-			}
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 			(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 			id_metadata_table[vID].decimal_place, actualVal);
+		// 	}
 			
-			if((bSize == 1)&&(uTYPE == TYPE_INT8)){
-				int8_t sVal = ((int8_t)sIOT_COMM.RX_DATA[x + 1]);
-				actualVal = (float)sVal * id_metadata_table[vID].multiplier;
+		// 	if((bSize == 1)&&(uTYPE == TYPE_INT8)){
+		// 		int8_t sVal = ((int8_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 		actualVal = (float)sVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-					(unsigned long)x, vID, id_metadata_table[vID].name, 
-					id_metadata_table[vID].decimal_place, actualVal);
-			}
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 			(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 			id_metadata_table[vID].decimal_place, actualVal);
+		// 	}
 			
-			if ((bSize == 2)&&(uTYPE == TYPE_UINT16)) {
-				uint16_t rawVal = ((uint16_t)sIOT_COMM.RX_DATA[x + 2] << 8) | ((uint16_t)sIOT_COMM.RX_DATA[x + 1]);
-				actualVal = (float)rawVal * id_metadata_table[vID].multiplier;
+		// 	if ((bSize == 2)&&(uTYPE == TYPE_UINT16)) {
+		// 		uint16_t rawVal = ((uint16_t)sIOT_COMM.RX_DATA[x + 2] << 8) | ((uint16_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 		actualVal = (float)rawVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-					(unsigned long)x, vID, id_metadata_table[vID].name, 
-					id_metadata_table[vID].decimal_place, actualVal);
-			}
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 			(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 			id_metadata_table[vID].decimal_place, actualVal);
+		// 	}
 			
-			if ((bSize == 2)&&(uTYPE == TYPE_INT16)) {
-				uint16_t rawBits = ((uint16_t)sIOT_COMM.RX_DATA[x + 2] << 8) | ((uint16_t)sIOT_COMM.RX_DATA[x + 1]);
-				int16_t sVal = (int16_t)rawBits;
-				actualVal = (float)sVal * id_metadata_table[vID].multiplier;
+		// 	if ((bSize == 2)&&(uTYPE == TYPE_INT16)) {
+		// 		uint16_t rawBits = ((uint16_t)sIOT_COMM.RX_DATA[x + 2] << 8) | ((uint16_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 		int16_t sVal = (int16_t)rawBits;
+		// 		actualVal = (float)sVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-					(unsigned long)x, vID, id_metadata_table[vID].name, 
-					id_metadata_table[vID].decimal_place, actualVal);
-			}
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 			(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 			id_metadata_table[vID].decimal_place, actualVal);
+		// 	}
 			
-			if((bSize == 4)&&(uTYPE == TYPE_UINT32)){
-				uint32_t uVal = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 	if((bSize == 4)&&(uTYPE == TYPE_UINT32)){
+		// 		uint32_t uVal = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
 						
-				actualVal = (float)uVal * id_metadata_table[vID].multiplier;
+		// 		actualVal = (float)uVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-				(unsigned long)x, vID, id_metadata_table[vID].name, 
-				id_metadata_table[vID].decimal_place, actualVal);
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 		(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 		id_metadata_table[vID].decimal_place, actualVal);
 				
-			}
+		// 	}
 			
-			if((bSize == 4)&&(uTYPE == TYPE_INT32)){
-				uint32_t rawBits = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 	if((bSize == 4)&&(uTYPE == TYPE_INT32)){
+		// 		uint32_t rawBits = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
 						
-				int32_t sVal = (int32_t)rawBits;
-				actualVal = (float)sVal * id_metadata_table[vID].multiplier;
+		// 		int32_t sVal = (int32_t)rawBits;
+		// 		actualVal = (float)sVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-				(unsigned long)x, vID, id_metadata_table[vID].name, 
-				id_metadata_table[vID].decimal_place, actualVal);
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 		(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 		id_metadata_table[vID].decimal_place, actualVal);
 				
-			}
+		// 	}
 			
-			if((bSize == 4) && (uTYPE == TYPE_FLOAT)){
-				uint32_t rawBits = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
-						((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
-				printf("RAW Float Value [%ld]", rawBits);
+		// 	if((bSize == 4) && (uTYPE == TYPE_FLOAT)){
+		// 		uint32_t rawBits = ((uint32_t)sIOT_COMM.RX_DATA[x + 4] << 24) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 3] << 16) |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 2] << 8)  |
+		// 				((uint32_t)sIOT_COMM.RX_DATA[x + 1]);
+		// 		printf("RAW Float Value [%ld]", rawBits);
 						
-				float fVal;
-				memcpy(&fVal, &rawBits, sizeof(fVal));
-				actualVal = fVal * id_metadata_table[vID].multiplier;
+		// 		float fVal;
+		// 		memcpy(&fVal, &rawBits, sizeof(fVal));
+		// 		actualVal = fVal * id_metadata_table[vID].multiplier;
 				
-				printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
-				(unsigned long)x, vID, id_metadata_table[vID].name, 
-				id_metadata_table[vID].decimal_place, actualVal);
-			}
+		// 		printf("Index[%2lu] | ID 0x%02X | %-16s = %.*f\n", 
+		// 		(unsigned long)x, vID, id_metadata_table[vID].name, 
+		// 		id_metadata_table[vID].decimal_place, actualVal);
+		// 	}
 			
-		}
+		// }
 
 		// if (sIOT_COMM.RX_DATA_RECEIVED) {
 		// 	printf("\n--- Extracted Header ---\n");

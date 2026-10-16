@@ -47,22 +47,6 @@
 //     uint8_t data[SERVER_PACKET_MAX_SIZE];
 // } server_packet_t;
 
-typedef enum {
-    APP_COMMAND_DISPLAY_REQUEST,
-} app_command_type_t;
-
-typedef struct {
-    app_command_type_t type;
-    uint32_t request_id;
-    char version[17];
-    char table_number[3];
-} app_command_t;
-
-// typedef struct {
-//     uint32_t request_id;
-//     bool success;
-//     server_packet_t packet;
-// } app_response_t;
 
 typedef struct {
     char ssid[33];
@@ -201,19 +185,29 @@ static void app_command_processor_task(void *arg)
             ESP_LOGI(TAG, "Destination: %02X, Source: %02X, Packet Type: %02X, Table NO: %02X", Destination, Source, PacketType, Table_NO);
 
             if (PacketType == 1) {
-                app_response_t response = {
+                app_command_t command = {
+                    .type = APP_COMMAND_DISPLAY_REQUEST,
+                    .packet_type = PacketType,
                     .request_id = s_next_request_id++,
-                    .success = true,
-                    .packet = {0},
+                    .version = {0},
+                    .table_number = {0},
                 };
-                response.packet.length = incoming_packet.length;
-                memcpy(response.packet.data, incoming_packet.data, incoming_packet.length);
 
-                if (xQueueSend(s_app_response_queue, &response, 0) != pdTRUE) {
-                    ESP_LOGE(TAG, "Could not queue response packet");
+                snprintf(command.version, sizeof(command.version),
+                         "%02X%02X%02X%02X%02X%02X%02X%02X",
+                         received_version[0], received_version[1],
+                         received_version[2], received_version[3],
+                         received_version[4], received_version[5],
+                         received_version[6], received_version[7]);
+                snprintf(command.table_number, sizeof(command.table_number),
+                         "%02X", Table_NO);
+
+                if (xQueueSend(s_app_command_queue, &command, 0) != pdTRUE) {
+                    ESP_LOGE(TAG, "Could not queue app command");
                 } else {
-                    Send_Data_APP = true;
-                    ESP_LOGI(TAG, "Response packet queued successfully");
+                    ESP_LOGI(TAG, "App command queued successfully: req=%lu, table=%s",
+                             (unsigned long)command.request_id,
+                             command.table_number);
                 }
             }
         } else {
@@ -803,9 +797,14 @@ static bool run_tcp_connection(uint32_t phone_ip)
 
             if (receive_buffer[0] == '#' && receive_buffer[1] == '#') {
                 ESP_LOGI(TAG, "receive_buffer raw: len=%zu data=", receive_length);
-                // for (size_t i = 0; i < receive_length; i++) {
-                //     ESP_LOGI(TAG, "%c", (unsigned char)receive_buffer[i]);
-                // }
+                if (receive_length < 8) {
+                    ESP_LOGW(TAG, "Discarding short packet: len=%zu", receive_length);
+                    memset(receive_buffer, 0, sizeof(receive_buffer));
+                    receive_length = 0;
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+
                 uint16_t calculated_crc = 0xFFFF;
                 for (size_t i = 0; i < receive_length - 4; i++) {
                     calculated_crc ^= (uint8_t)receive_buffer[i];
@@ -815,20 +814,28 @@ static bool run_tcp_connection(uint32_t phone_ip)
                             : calculated_crc >> 1;
                     }
                 }
-                uint16_t received_crc = (uint16_t)strtoul((char[]){receive_buffer[receive_length - 4], receive_buffer[receive_length - 3],
-                    receive_buffer[receive_length - 2], receive_buffer[receive_length - 1], '\0'},NULL, 16);
-                if(calculated_crc == received_crc) {
+
+                if (receive_length < 4) {
+                    ESP_LOGW(TAG, "Packet too short for CRC: len=%zu", receive_length);
+                    memset(receive_buffer, 0, sizeof(receive_buffer));
+                    receive_length = 0;
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+
+                uint16_t received_crc = (uint16_t)strtoul(
+                    (char[]){
+                        receive_buffer[receive_length - 4],
+                        receive_buffer[receive_length - 3],
+                        receive_buffer[receive_length - 2],
+                        receive_buffer[receive_length - 1],
+                        '\0'
+                    },
+                    NULL,
+                    16
+                );
+                if (calculated_crc == received_crc) {
                     ESP_LOGI(TAG, "CRC Value: %04X", calculated_crc);
-                    // Send TXB as raw bytes, using its real length
-                    // if (total_length > 0 && total_length <= SERVER_PACKET_MAX_SIZE) {
-                    //     if (!send_all(socket_fd, (const char *)TXB, total_length)) {
-                    //         ESP_LOGE(TAG, "Could not send TXB to app");
-                    //     } else {
-                    //         ESP_LOGI(TAG, "TXB sent to app (%zu bytes)", total_length);
-                    //     }
-                    // } else {
-                    //     ESP_LOGW(TAG, "Invalid TXB length for send: %zu", total_length);
-                    // }
                     server_packet_t packet = {0};
                     packet.length = receive_length;
                     memcpy(packet.data, receive_buffer, receive_length);
@@ -837,45 +844,21 @@ static bool run_tcp_connection(uint32_t phone_ip)
                         receive_length = 0;
                     } else {
                         ESP_LOGW(TAG, "Queue full; dropped packet");
-                    }
-
-                    // u8 received_version[PRODUCT_VERSION_SIZE];
-
-                    // for (int i = 0; i < PRODUCT_VERSION_SIZE; i++) {
-                    //     char hex[3] = {
-                    //         receive_buffer[2 + i * 2],
-                    //         receive_buffer[3 + i * 2],
-                    //         '\0'
-                    //     };
-
-                    //     received_version[i] = (u8)strtoul(hex, NULL, 16);
-                    // }
-                    // if (memcmp(PRODUCT_VERSION, received_version, PRODUCT_VERSION_SIZE) == 0) {
-                    //     ESP_LOGI(TAG, "Product version matched");
-                    //     u8 Destination = (u8)strtol((char[]){receive_buffer[18], receive_buffer[19], '\0'}, NULL, 16);
-                    //     u8 Source = (u8)strtol((char[]){receive_buffer[20], receive_buffer[21], '\0'}, NULL, 16);
-                    //     u8 PacketType = (u8)strtol((char[]){receive_buffer[22], receive_buffer[23], '\0'}, NULL, 16);
-                    //     u8 Table_NO = (u8)strtol((char[]){receive_buffer[24], receive_buffer[25], '\0'}, NULL, 16);
-                    //     ESP_LOGI(TAG, "Destination: %02X, Source: %02X, Packet Type: %02X, Table NO: %02X", Destination, Source, PacketType, Table_NO);
-                    // } else {
-                    //     ESP_LOGE(TAG, "Product version mismatch");
-                    //     return false;
-                    // }
-                }
-            }
-            if(Send_Data_APP){
-                // Send TXB as raw bytes, using its real length
-                ESP_LOGW(TAG, "Sending TXB to app: %zu bytes", total_length);
-                if (total_length > 0 && total_length <= SERVER_PACKET_MAX_SIZE) {
-                    if (!send_all(socket_fd, (const char *)TXB, total_length)) {
-                        ESP_LOGE(TAG, "Could not send TXB to app");
-                    } else {
-                        Send_Data_APP = false;
-                        ESP_LOGI(TAG, "TXB sent to app (%zu bytes)", total_length);
+                        memset(receive_buffer, 0, sizeof(receive_buffer));
+                        receive_length = 0;
                     }
                 } else {
-                    ESP_LOGW(TAG, "Invalid TXB length for send: %zu", total_length);
+                    ESP_LOGW(TAG, "CRC mismatch: calc=%04X recv=%04X; dropping packet",
+                             calculated_crc, received_crc);
+                    memset(receive_buffer, 0, sizeof(receive_buffer));
+                    receive_length = 0;
+                    vTaskDelay(pdMS_TO_TICKS(10));
                 }
+            } else {
+                ESP_LOGW(TAG, "Discarding non-APP packet prefix; len=%zu", receive_length);
+                memset(receive_buffer, 0, sizeof(receive_buffer));
+                receive_length = 0;
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
     }
@@ -1016,7 +999,7 @@ void app_main(void)
 
     // Holds the responses of process data from esp32
     s_app_response_queue = xQueueCreate(
-        APP_COMMAND_QUEUE_LENGTH, sizeof(app_response_t)
+        APP_COMMAND_QUEUE_LENGTH, sizeof(server_packet_t)
     );
     if (s_app_response_queue == NULL) {
         ESP_LOGE(TAG, "Could not create app response queue");
