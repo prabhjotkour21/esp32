@@ -212,6 +212,7 @@ static void app_command_processor_task(void *arg)
                 if (xQueueSend(s_app_response_queue, &response, 0) != pdTRUE) {
                     ESP_LOGE(TAG, "Could not queue response packet");
                 } else {
+                    Send_Data_APP = true;
                     ESP_LOGI(TAG, "Response packet queued successfully");
                 }
             }
@@ -728,6 +729,24 @@ static bool run_tcp_connection(uint32_t phone_ip)
     bool connected = true;
 
     while (connected) {
+        app_response_t outbound_response = {0};
+        if (xQueueReceive(s_app_response_queue, &outbound_response, 0) == pdTRUE) {
+            if (outbound_response.packet.length > 0 &&
+                outbound_response.packet.length <= sizeof(outbound_response.packet.data)) {
+                if (!send_all(socket_fd, (const char *)outbound_response.packet.data,
+                              outbound_response.packet.length)) {
+                    ESP_LOGW(TAG, "Could not send queued response packet to phone");
+                    connected = false;
+                    break;
+                }
+                ESP_LOGI(TAG, "Sent queued response packet (%zu bytes)",
+                         outbound_response.packet.length);
+            } else {
+                ESP_LOGW(TAG, "Queued response has invalid length: %zu",
+                         outbound_response.packet.length);
+            }
+        }
+
         fd_set read_set;
         FD_ZERO(&read_set);
         FD_SET(socket_fd, &read_set);
@@ -846,6 +865,7 @@ static bool run_tcp_connection(uint32_t phone_ip)
             }
             if(Send_Data_APP){
                 // Send TXB as raw bytes, using its real length
+                ESP_LOGW(TAG, "Sending TXB to app: %zu bytes", total_length);
                 if (total_length > 0 && total_length <= SERVER_PACKET_MAX_SIZE) {
                     if (!send_all(socket_fd, (const char *)TXB, total_length)) {
                         ESP_LOGE(TAG, "Could not send TXB to app");
