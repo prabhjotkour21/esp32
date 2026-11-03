@@ -31,5 +31,5 @@
     "--compile-commands-dir=d:\\Chetan\\ESP-IDF ESP32C3\\Web_Socket_New_Test_0.1\\build"
   ],
   "idf.flashType": "UART",
-  "idf.port": "/dev/tty.usbserial-110"
+  "idf.port": "/dev/tty.SLAB_USBtoUART"
 }

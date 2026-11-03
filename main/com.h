@@ -1,3 +1,6 @@
+#ifndef COM_H
+#define COM_H
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -163,6 +166,8 @@ u16 FIND_CRC(u16 CRC_VAL, u16 DATA_BYTE);
 
 void putNibble(uint8_t *ptr, int8_t val);
 void putByte(uint8_t *ptr, uint8_t val);
+uint8_t getByte(uint8_t *ptr);
+uint8_t getHex(uint8_t ch);
 void Process_data(void *arg);
 bool queue_server_packet(const uint8_t *data, size_t length);
 
@@ -173,12 +178,12 @@ bool queue_server_packet(const uint8_t *data, size_t length);
 #define APP_SERVER_PORT 8080
 #define PROVISIONING_MAX_BODY 512
 #define WIFI_CONNECTED_BIT BIT0
-#define TCP_RETRY_DELAY_MS 2000
+#define TCP_RETRY_DELAY_MS 3000
 #define TCP_ACK_TIMEOUT_MS 3000
 #define TCP_MAX_PACKET_RETRIES 5
 #define MDNS_QUERY_TIMEOUT_MS 3000
 
-#define SERVER_PACKET_MAX_SIZE 256
+#define SERVER_PACKET_MAX_SIZE 512
 #define SERVER_PACKET_QUEUE_LENGTH 5
 #define APP_COMMAND_QUEUE_LENGTH 5
 #define DEVICE_ID "ESP32_0001"
@@ -190,6 +195,7 @@ typedef struct {
 
 typedef enum {
     APP_COMMAND_DISPLAY_REQUEST,
+	APP_COMMAND_TIMESTAMP_REQUEST
 } app_command_type_t;
 
 typedef struct {
@@ -198,6 +204,7 @@ typedef struct {
 	uint8_t packet_type;
     char version[17];
     char table_number[3];
+	uint32_t timestamp;
 } app_command_t;
 
 typedef struct {
@@ -206,7 +213,7 @@ typedef struct {
     server_packet_t packet;
 } app_response_t;
 
-extern size_t total_length;
+extern volatile size_t total_length;
 extern QueueHandle_t s_server_packet_queue;
 extern QueueHandle_t s_app_command_queue;
 extern QueueHandle_t s_app_response_queue;
@@ -215,7 +222,10 @@ extern bool Send_Data_APP;
 #define VALID_PACKET               1
 #define INVALID_PACKET             0
 #define Display_Packet_TYPE        1
+#define LOG_Packet_TYPE            2
+#define Timestamp_Packet_TYPE      7
 
+#endif
 
 
 #define PRODUCT     1
